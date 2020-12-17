@@ -1415,7 +1415,7 @@ static void promote_done(struct closure *cl)
 	bch2_time_stats_update(&c->times[BCH_TIME_data_promote],
 			       op->start_time);
 
-	bch2_bio_free_pages_pool(c, &op->write.op.wbio.bio);
+	bch2_migrate_write_exit(&op->write);
 	promote_free(c, op);
 }
 

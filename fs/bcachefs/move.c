@@ -94,8 +94,15 @@ static int bch2_migrate_index_update(struct bch_write_op *op)
 		new = bkey_i_to_extent(bch2_keylist_front(keys));
 
 		if (bversion_cmp(k.k->version, new->k.version) ||
-		    !bch2_bkey_matches_ptr(c, k, m->ptr, m->offset))
+		    !bch2_bkey_matches_ptr(c, k, m->ptr, m->offset)) {
+			char buf1[200];
+			char buf2[200];
+
+
+
+			pr_info("does not match ptr");
 			goto nomatch;
+		}
 
 		bkey_reassemble(_insert.k, k);
 		insert = _insert.k;
@@ -112,8 +119,10 @@ static int bch2_migrate_index_update(struct bch_write_op *op)
 			struct bch_extent_ptr *new_ptr, *old_ptr = (void *)
 				bch2_bkey_has_device(bkey_i_to_s_c(insert),
 						     m->data_opts.rewrite_dev);
-			if (!old_ptr)
+			if (!old_ptr) {
+				pr_info("no longer on rewrite dev");
 				goto nomatch;
+			}
 
 			if (old_ptr->cached)
 				extent_for_each_ptr(extent_i_to_s(new), new_ptr)
@@ -136,8 +145,10 @@ static int bch2_migrate_index_update(struct bch_write_op *op)
 			did_work = true;
 		}
 
-		if (!did_work)
+		if (!did_work) {
+			pr_info("did no work");
 			goto nomatch;
+		}
 
 		bch2_bkey_narrow_crcs(insert,
 				(struct bch_extent_crc_unpacked) { 0 });
@@ -175,8 +186,10 @@ err:
 			atomic_long_inc(&c->extent_migrate_done);
 		if (ret == -EINTR)
 			ret = 0;
-		if (ret)
+		if (ret) {
+			pr_err("ret %i", ret);
 			break;
+		}
 next:
 		while (bkey_cmp(iter->pos, bch2_keylist_front(keys)->k.p) >= 0) {
 			bch2_keylist_pop_front(keys);
@@ -226,6 +239,12 @@ void bch2_migrate_read_done(struct migrate_write *m, struct bch_read_bio *rbio)
 		bch2_dev_list_drop_dev(&m->op.devs_have, m->data_opts.rewrite_dev);
 }
 
+void bch2_migrate_write_exit(struct migrate_write *m)
+{
+	bch2_bio_free_pages_pool(m->op.c, &m->op.wbio.bio);
+	bkey_on_stack_exit(&m->orig, m->op.c);
+}
+
 int bch2_migrate_write_init(struct bch_fs *c, struct migrate_write *m,
 			    struct write_point_specifier wp,
 			    struct bch_io_opts io_opts,
@@ -238,6 +257,9 @@ int bch2_migrate_write_init(struct bch_fs *c, struct migrate_write *m,
 	const union bch_extent_entry *entry;
 	struct extent_ptr_decoded p;
 	int ret;
+
+	bkey_on_stack_init(&m->orig);
+	bkey_on_stack_reassemble(&m->orig, c, k);
 
 	m->btree_id	= btree_id;
 	m->data_cmd	= data_cmd;
@@ -329,14 +351,10 @@ static void move_free(struct closure *cl)
 {
 	struct moving_io *io = container_of(cl, struct moving_io, cl);
 	struct moving_context *ctxt = io->write.ctxt;
-	struct bvec_iter_all iter;
-	struct bio_vec *bv;
+
+	bch2_migrate_write_exit(&io->write);
 
 	bch2_disk_reservation_put(io->write.op.c, &io->write.op.res);
-
-	bio_for_each_segment_all(bv, &io->write.op.wbio.bio, iter)
-		if (bv->bv_page)
-			__free_page(bv->bv_page);
 
 	wake_up(&ctxt->wait);
 

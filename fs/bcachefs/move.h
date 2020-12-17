@@ -2,6 +2,7 @@
 #ifndef _BCACHEFS_MOVE_H
 #define _BCACHEFS_MOVE_H
 
+#include "bkey_on_stack.h"
 #include "btree_iter.h"
 #include "buckets.h"
 #include "io_types.h"
@@ -35,13 +36,14 @@ struct migrate_write {
 	struct moving_context	*ctxt;
 
 	/* what we read: */
-	struct bch_extent_ptr	ptr;
+	struct bkey_on_stack	orig;
 	u64			offset;
 
 	struct bch_write_op	op;
 };
 
 void bch2_migrate_read_done(struct migrate_write *, struct bch_read_bio *);
+void bch2_migrate_write_exit(struct migrate_write *);
 int bch2_migrate_write_init(struct bch_fs *, struct migrate_write *,
 			    struct write_point_specifier,
 			    struct bch_io_opts,
