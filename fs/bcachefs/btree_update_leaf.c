@@ -988,10 +988,27 @@ int bch2_trans_update(struct btree_trans *trans, struct btree_iter *iter,
 			: k->k.p));
 
 	trans_for_each_update(trans, i) {
-		BUG_ON(bkey_cmp(i->iter->pos,
-				 (i->iter->flags & BTREE_ITER_IS_EXTENTS)
-				 ? bkey_start_pos(&i->k->k)
-				 : i->k->k.p));
+		if (bkey_cmp(i->iter->pos,
+			     (i->iter->flags & BTREE_ITER_IS_EXTENTS)
+			     ? bkey_start_pos(&i->k->k)
+			     : i->k->k.p)) {
+			struct btree_insert_entry *j;
+
+			trans_for_each_update(trans, j) {
+				char buf[200];
+
+				bch2_bkey_val_to_text(&PBUF(buf), trans->c, bkey_i_to_s_c(j->k));
+				printk(KERN_ERR "%s %s %llu:%llu %s\n",
+				       i == j ? "*" : " ",
+				       bch2_btree_ids[j->iter->btree_id],
+				       j->iter->pos.inode,
+				       j->iter->pos.offset,
+				       buf);
+			}
+
+			printk(KERN_ERR "update key doesn't match iter pos\n");
+			BUG();
+		}
 
 		BUG_ON(i != trans->updates &&
 		       btree_iter_pos_cmp(i[-1].iter, i[0].iter) >= 0);
