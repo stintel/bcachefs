@@ -1352,7 +1352,9 @@ int bch2_fs_initialize(struct bch_fs *c)
 
 	bkey_snapshot_init(&root_snapshot.k_i);
 	root_snapshot.k.p.offset = U32_MAX;
+	root_snapshot.v.flags	= 0;
 	root_snapshot.v.parent	= 0;
+	root_snapshot.v.subvol	= BCACHEFS_ROOT_SUBVOL;
 	root_snapshot.v.pad	= 0;
 
 	err = "error creating root snapshot node";
