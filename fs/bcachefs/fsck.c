@@ -38,9 +38,9 @@ static s64 bch2_count_inode_sectors(struct btree_trans *trans, u64 inum)
 	return ret ?: sectors;
 }
 
-static int lookup_inode(struct btree_trans *trans, u64 inode_nr,
-			struct bch_inode_unpacked *inode,
-			u32 *snapshot)
+static int __lookup_inode(struct btree_trans *trans, u64 inode_nr,
+			  struct bch_inode_unpacked *inode,
+			  u32 *snapshot)
 {
 	struct btree_iter *iter;
 	struct bkey_s_c k;
@@ -61,6 +61,13 @@ static int lookup_inode(struct btree_trans *trans, u64 inode_nr,
 err:
 	bch2_trans_iter_free(trans, iter);
 	return ret;
+}
+
+static int lookup_inode(struct btree_trans *trans, u64 inode_nr,
+			struct bch_inode_unpacked *inode,
+			u32 *snapshot)
+{
+	return lockrestart_do(trans, __lookup_inode(trans, inode_nr, inode, snapshot));
 }
 
 static int write_inode(struct btree_trans *trans,
@@ -114,6 +121,55 @@ static int remove_dirent(struct btree_trans *trans, struct bpos pos)
 	return ret;
 }
 
+/* Get lost+found, create if it doesn't exist: */
+static int lookup_lostfound(struct btree_trans *trans,
+			    struct bch_inode_unpacked *lostfound)
+{
+	struct bch_fs *c = trans->c;
+	struct bch_inode_unpacked root;
+	struct bch_hash_info root_hash_info;
+	struct qstr lostfound_str = QSTR("lost+found");
+	u64 inum;
+	u32 snapshot;
+	int ret;
+
+	ret = lookup_inode(trans, BCACHEFS_ROOT_INO, &root, &snapshot);
+	if (ret && ret != -ENOENT)
+		return ret;
+
+	root_hash_info = bch2_hash_info_init(c, &root);
+	inum = bch2_dirent_lookup(c, BCACHEFS_ROOT_INO, &root_hash_info,
+				  &lostfound_str);
+	if (!inum) {
+		bch_notice(c, "creating lost+found");
+		goto create_lostfound;
+	}
+
+	ret = lookup_inode(trans, inum, lostfound, &snapshot);
+	if (ret && ret != -ENOENT) {
+		bch_err(c, "error looking up lost+found: %i", ret);
+		return ret;
+	}
+
+	if (ret == -ENOENT) {
+create_lostfound:
+		bch2_inode_init_early(c, lostfound);
+
+		ret = __bch2_trans_do(trans, NULL, NULL,
+				      BTREE_INSERT_NOFAIL|
+				      BTREE_INSERT_LAZY_RW,
+			bch2_create_trans(trans,
+					  BCACHEFS_ROOT_INO, &root,
+					  lostfound,
+					  &lostfound_str,
+					  0, 0, S_IFDIR|0700, 0, NULL, NULL));
+		if (ret)
+			bch_err(c, "error creating lost+found: %i", ret);
+	}
+
+	return 0;
+}
+
 static int __reattach_inode(struct btree_trans *trans,
 			    struct bch_inode_unpacked *lostfound,
 			    u64 inum)
@@ -155,12 +211,17 @@ static int __reattach_inode(struct btree_trans *trans,
 	return write_inode(trans, &inode_u, U32_MAX);
 }
 
-static int reattach_inode(struct btree_trans *trans,
-			  struct bch_inode_unpacked *lostfound,
-			  u64 inum)
+static int reattach_inode(struct btree_trans *trans, u64 inum)
 {
-	int ret = __bch2_trans_do(trans, NULL, NULL, BTREE_INSERT_LAZY_RW,
-			      __reattach_inode(trans, lostfound, inum));
+	struct bch_inode_unpacked lostfound;
+	int ret;
+
+	ret = lookup_lostfound(trans, &lostfound);
+	if (ret)
+		return ret;
+
+	ret = __bch2_trans_do(trans, NULL, NULL, BTREE_INSERT_LAZY_RW,
+			      __reattach_inode(trans, &lostfound, inum));
 	if (ret)
 		bch_err(trans->c, "error %i reattaching inode %llu", ret, inum);
 
@@ -931,58 +992,6 @@ create_root:
 				 BTREE_INSERT_LAZY_RW);
 }
 
-/* Get lost+found, create if it doesn't exist: */
-static int check_lostfound(struct bch_fs *c,
-			   struct bch_inode_unpacked *root_inode,
-			   struct bch_inode_unpacked *lostfound_inode)
-{
-	struct qstr lostfound = QSTR("lost+found");
-	struct bch_hash_info root_hash_info =
-		bch2_hash_info_init(c, root_inode);
-	u64 inum;
-	u32 snapshot;
-	int ret;
-
-	bch_verbose(c, "checking lost+found");
-
-	inum = bch2_dirent_lookup(c, BCACHEFS_ROOT_INO, &root_hash_info,
-				 &lostfound);
-	if (!inum) {
-		bch_notice(c, "creating lost+found");
-		goto create_lostfound;
-	}
-
-	ret = bch2_trans_do(c, NULL, NULL, 0,
-		lookup_inode(&trans, inum, lostfound_inode, &snapshot));
-	if (ret && ret != -ENOENT)
-		return ret;
-
-	if (fsck_err_on(ret, c, "lost+found missing"))
-		goto create_lostfound;
-
-	if (fsck_err_on(!S_ISDIR(lostfound_inode->bi_mode), c,
-			"lost+found inode not a directory"))
-		goto create_lostfound;
-
-	return 0;
-fsck_err:
-	return ret;
-create_lostfound:
-	bch2_inode_init_early(c, lostfound_inode);
-
-	ret = bch2_trans_do(c, NULL, NULL,
-			    BTREE_INSERT_NOFAIL|
-			    BTREE_INSERT_LAZY_RW,
-		bch2_create_trans(&trans,
-				  BCACHEFS_ROOT_INO, root_inode,
-				  lostfound_inode, &lostfound,
-				  0, 0, S_IFDIR|0700, 0, NULL, NULL));
-	if (ret)
-		bch_err(c, "error creating lost+found: %i", ret);
-
-	return ret;
-}
-
 struct pathbuf {
 	size_t		nr;
 	size_t		size;
@@ -1014,7 +1023,6 @@ static int path_down(struct pathbuf *p, u64 inum)
 }
 
 static int check_path(struct btree_trans *trans,
-		      struct bch_inode_unpacked *lostfound,
 		      struct pathbuf *p,
 		      struct bch_inode_unpacked *inode)
 {
@@ -1038,7 +1046,7 @@ static int check_path(struct btree_trans *trans,
 				     inode->bi_nlink,
 				     inode->bi_dir,
 				     inode->bi_dir_offset))
-				ret = reattach_inode(trans, lostfound, inode->bi_inum);
+				ret = reattach_inode(trans, inode->bi_inum);
 			break;
 		}
 		ret = 0;
@@ -1067,12 +1075,11 @@ static int check_path(struct btree_trans *trans,
 				break;
 			}
 
-			ret = reattach_inode(trans, lostfound, inode->bi_inum);
+			ret = reattach_inode(trans, inode->bi_inum);
 			break;
 		}
 
-		ret = lockrestart_do(trans,
-				lookup_inode(trans, inode->bi_dir, inode, &snapshot));
+		ret = lookup_inode(trans, inode->bi_dir, inode, &snapshot);
 		if (ret) {
 			/* Should have been caught in dirents pass */
 			bch_err(c, "error looking up parent directory: %i", ret);
@@ -1090,8 +1097,7 @@ fsck_err:
  * After check_dirents(), if an inode backpointer doesn't exist that means it's
  * unreachable:
  */
-static int check_directory_structure(struct bch_fs *c,
-				     struct bch_inode_unpacked *lostfound)
+static int check_directory_structure(struct bch_fs *c)
 {
 	struct btree_trans trans;
 	struct btree_iter *iter;
@@ -1113,7 +1119,7 @@ static int check_directory_structure(struct bch_fs *c,
 			break;
 		}
 
-		ret = check_path(&trans, lostfound, &path, &u);
+		ret = check_path(&trans, &path, &u);
 		if (ret)
 			break;
 	}
@@ -1190,7 +1196,6 @@ static int bch2_gc_walk_dirents(struct bch_fs *c, nlink_table *links,
 }
 
 static int check_inode_nlink(struct btree_trans *trans,
-			     struct bch_inode_unpacked *lostfound_inode,
 			     struct btree_iter *iter,
 			     struct bkey_s_c_inode inode,
 			     unsigned nlink)
@@ -1238,7 +1243,6 @@ fsck_err:
 
 noinline_for_stack
 static int bch2_gc_walk_inodes(struct bch_fs *c,
-			       struct bch_inode_unpacked *lostfound_inode,
 			       nlink_table *links,
 			       u64 range_start, u64 range_end)
 {
@@ -1259,7 +1263,7 @@ static int bch2_gc_walk_inodes(struct bch_fs *c,
 			continue;
 
 		link = genradix_ptr(links, k.k->p.offset - range_start);
-		ret = check_inode_nlink(&trans, lostfound_inode, iter,
+		ret = check_inode_nlink(&trans, iter,
 					bkey_s_c_to_inode(k), link ? link->count : 0);
 		if (ret)
 			break;
@@ -1275,8 +1279,7 @@ static int bch2_gc_walk_inodes(struct bch_fs *c,
 }
 
 noinline_for_stack
-static int check_nlinks(struct bch_fs *c,
-			      struct bch_inode_unpacked *lostfound_inode)
+static int check_nlinks(struct bch_fs *c)
 {
 	nlink_table links;
 	u64 this_iter_range_start, next_iter_range_start = 0;
@@ -1296,7 +1299,7 @@ static int check_nlinks(struct bch_fs *c,
 		if (ret)
 			break;
 
-		ret = bch2_gc_walk_inodes(c, lostfound_inode, &links,
+		ret = bch2_gc_walk_inodes(c, &links,
 					 this_iter_range_start,
 					 next_iter_range_start);
 		if (ret)
@@ -1316,16 +1319,15 @@ static int check_nlinks(struct bch_fs *c,
  */
 int bch2_fsck_full(struct bch_fs *c)
 {
-	struct bch_inode_unpacked root_inode, lostfound_inode;
+	struct bch_inode_unpacked root_inode;
 
 	return  check_inodes(c, true) ?:
 		check_extents(c) ?:
 		check_dirents(c) ?:
 		check_xattrs(c) ?:
 		check_root(c, &root_inode) ?:
-		check_lostfound(c, &root_inode, &lostfound_inode) ?:
-		check_directory_structure(c, &lostfound_inode) ?:
-		check_nlinks(c, &lostfound_inode);
+		check_directory_structure(c) ?:
+		check_nlinks(c);
 }
 
 int bch2_fsck_walk_inodes_only(struct bch_fs *c)
