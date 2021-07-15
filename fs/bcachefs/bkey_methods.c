@@ -102,6 +102,7 @@ static unsigned bch2_key_types_allowed[] = {
 	[BKEY_TYPE_extents] =
 		(1U << KEY_TYPE_discard)|
 		(1U << KEY_TYPE_error)|
+		(1U << KEY_TYPE_cookie)|
 		(1U << KEY_TYPE_extent)|
 		(1U << KEY_TYPE_reservation)|
 		(1U << KEY_TYPE_reflink_p)|
