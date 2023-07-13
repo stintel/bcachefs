@@ -42,6 +42,15 @@ static inline const struct snapshot_t *snapshot_t(struct bch_fs *c, u32 id)
 	return __snapshot_t(rcu_dereference(c->snapshots), id);
 }
 
+static inline u32 bch2_snapshot_tree(struct bch_fs *c, u32 id)
+{
+	rcu_read_lock();
+	id = snapshot_t(c, id)->tree;
+	rcu_read_unlock();
+
+	return id;
+}
+
 static inline u32 __bch2_snapshot_parent_early(struct bch_fs *c, u32 id)
 {
 	return snapshot_t(c, id)->parent;
