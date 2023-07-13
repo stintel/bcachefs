@@ -573,7 +573,7 @@ static int snapshot_tree_ptr_good(struct btree_trans *trans,
 	return bch2_snapshot_is_ancestor_early(trans->c, snap_id, le32_to_cpu(s_t.root_snapshot));
 }
 
-static u32 snapshot_rand_ancestor_get(struct bch_fs *c, u32 id)
+static u32 snapshot_skiplist_get(struct bch_fs *c, u32 id)
 {
 	const struct snapshot_t *s;
 
@@ -589,8 +589,7 @@ static u32 snapshot_rand_ancestor_get(struct bch_fs *c, u32 id)
 	return id;
 }
 
-static int snapshot_rand_ancestor_good(struct btree_trans *trans,
-				       struct bch_snapshot s)
+static int snapshot_skiplist_good(struct btree_trans *trans, struct bch_snapshot s)
 {
 	struct bch_snapshot a;
 	unsigned i;
@@ -791,11 +790,11 @@ static int check_snapshot(struct btree_trans *trans,
 		s = u->v;
 	}
 
-	ret = snapshot_rand_ancestor_good(trans, s);
+	ret = snapshot_skiplist_good(trans, s);
 	if (ret < 0)
 		goto err;
 
-	if (fsck_err_on(!ret, c, "snapshot with bad rand_ancestor field:\n  %s",
+	if (fsck_err_on(!ret, c, "snapshot with bad skiplist field:\n  %s",
 			(bch2_bkey_val_to_text(&buf, c, k), buf.buf))) {
 		u = bch2_bkey_make_mut_typed(trans, iter, &k, 0, snapshot);
 		ret = PTR_ERR_OR_ZERO(u);
@@ -803,7 +802,7 @@ static int check_snapshot(struct btree_trans *trans,
 			goto err;
 
 		for (i = 0; i < ARRAY_SIZE(u->v.skip); i++)
-			u->v.skip[i] = cpu_to_le32(snapshot_rand_ancestor_get(c, parent_id));
+			u->v.skip[i] = cpu_to_le32(snapshot_skiplist_get(c, parent_id));
 
 		bubble_sort(u->v.skip, ARRAY_SIZE(u->v.skip), cmp_int);
 		s = u->v;
@@ -1096,7 +1095,7 @@ static int create_snapids(struct btree_trans *trans, u32 parent, u32 tree,
 		n->v.depth	= cpu_to_le32(depth);
 
 		for (j = 0; j < ARRAY_SIZE(n->v.skip); j++)
-			n->v.skip[j] = cpu_to_le32(snapshot_rand_ancestor_get(c, parent));
+			n->v.skip[j] = cpu_to_le32(snapshot_skiplist_get(c, parent));
 
 		bubble_sort(n->v.skip, ARRAY_SIZE(n->v.skip), cmp_int);
 		SET_BCH_SNAPSHOT_SUBVOL(&n->v, true);
